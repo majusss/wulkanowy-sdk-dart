@@ -1,6 +1,6 @@
-import 'package:sdk_dart/sdk_dart.dart';
+import 'package:wulkanowy/sdk.dart';
 
-void main() {
-  var awesome = Awesome();
-  print('awesome: ${awesome.isAwesome}');
+void main() async {
+  final sdk = WulkanowySdk('https', 'vulcan.net.pl');
+  print(await sdk.login('login', 'password', 'powiatjaroslawski'));
 }

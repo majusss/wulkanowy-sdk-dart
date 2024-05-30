@@ -1,17 +1,18 @@
-import 'package:sdk_dart/src/login/login_helper.dart';
 import 'package:test/test.dart';
+import 'package:wulkanowy/sdk.dart';
 
 void main() {
   group('Standard login', () {
-    LoginHelper loginHelper;
+    late WulkanowySdk sdk;
 
     setUp(() {
-      loginHelper = LoginHelper('https', 'fakelog.cf', 'powiatwulkanowy');
+      sdk = WulkanowySdk('https', 'wulkanowy.net.pl');
     });
 
     test('should successfully login', () async {
-      final login = await loginHelper.login('jan@fakelog.cf', 'jan123');
-      expect(login.length, 3);
+      final login =
+          await sdk.login('jan@fakelog.cf', 'jan123', 'powiatwulkanowy');
+      expect(login, isNotEmpty);
     });
   });
 }

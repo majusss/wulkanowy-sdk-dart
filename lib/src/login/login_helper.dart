@@ -1,77 +1,151 @@
 import 'dart:core';
 import 'dart:convert';
-import 'package:http/http.dart' as http;
+import 'package:cookie_jar/cookie_jar.dart';
+import 'package:dio/dio.dart';
+import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import 'package:html/dom.dart';
 import 'package:html/parser.dart' show parse;
 
 class LoginHelper {
+  late Dio _dio;
+  final _cookieJar = CookieJar();
   final String schema;
   final String host;
   final String symbol;
-  String firstStepReturnUrl;
-  String _schoolId;
+  late String firstStepReturnUrl;
+  late String _schoolId;
 
   LoginHelper(this.schema, this.host, this.symbol) {
-    final url = encode(
-        schema + '://uonetplus.' + host + '/' + symbol + '/LoginEndpoint.aspx');
-    firstStepReturnUrl =
-        '/' + symbol + '/FS/LS?wa=wsignin1.0&wtrealm=' + url + '&wctx=' + url;
+    final targetRealm =
+        encode('$schema://uonetplus.$host/$symbol/LoginEndpoint.aspx');
+    final intermediateRealmPath = StringBuffer()
+      ..write('/$symbol/FS/LS')
+      ..write('?wa=wsignin1.0')
+      ..write('&wtrealm=$targetRealm')
+      ..write("&wctx=${encode("auth=uonet")}");
+    final intermediateRealm =
+        encode('$schema://uonetplus-logowanie.$host$intermediateRealmPath');
+    final returnUrl = StringBuffer()
+      ..write('/$symbol/FS/LS')
+      ..write('?wa=wsignin1.0')
+      ..write('&wtrealm=$intermediateRealm')
+      ..write("&wctx=${encode("rm=0&id=")}")
+      ..write('&wct=${encode(DateTime.now().toIso8601String())}');
+    firstStepReturnUrl = returnUrl.toString();
+    _dio = Dio();
+    _dio.interceptors.add(CookieManager(_cookieJar));
   }
 
-  Future<List<Element>> login(String name, String password) async {
-    var cert = await sendCredentials(name, password);
-    var home = await sendCertificate(cert);
-    _schoolId = Uri.parse(home.querySelector('.appLink').querySelector('a').attributes['href']).pathSegments[1];
+  Future<String> login(String name, String password) async {
+    final cert = await sendCredentials(name, password);
+    await sendCertificate(cert);
+    final home = parse(
+        (await _dio.get('$schema://uonetplus.$host/$symbol/Start.mvc')).data);
 
-    return home.querySelectorAll('.klient a[href*=\"uonetplus-uczen\"]');
+    final students = home.querySelector('#idAppUczenExt');
+
+    if (students == null) {
+      final schoolId = home
+          .querySelectorAll('.appLink')
+          .firstWhere(
+              (e) => e.querySelector('a')?.attributes['title'] == 'Uczeń',
+              orElse: () => Element.tag('a'))
+          .querySelector('a')
+          ?.attributes['href'];
+
+      if (schoolId != null) {
+        _schoolId = Uri.parse(schoolId).pathSegments[1];
+      }
+    } else {
+      final schools = students.querySelectorAll('a');
+      // TODO: Implement multiple students support
+      print(
+          'Schools: ${schools.map((e) => e.attributes['title']?.trim()).join(', ')}');
+    }
+
+    return home.querySelector('.user-info')?.text.trim() ??
+        'No user info found';
   }
 
   Future<Document> sendCredentials(String name, String password) {
-    var loginName = name.split('||')[0];
+    final loginName = name.split('||')[0];
 
     return sendStandard(loginName, password);
   }
 
   Future<Document> sendStandard(String name, String password) async {
-    final baseUrl = schema + '://cufs.' + host;
-    final url = baseUrl +
-        '/' +
-        symbol +
-        '/Account/LogOn?ReturnUrl=' +
-        encode(firstStepReturnUrl);
-    final response = await http.post(url, body: {
-      'LoginName': name,
-      'Password': password,
-    });
+    final baseUrl = '$schema://cufs.$host';
 
-    final secondResponse =
-        await http.get(baseUrl + response.headers['location']);
+    final response = await _dio.post(
+        '$baseUrl/$symbol/Account/LogOn?ReturnUrl=${encode(firstStepReturnUrl)}',
+        data: {'LoginName': name, 'Password': password},
+        options: Options(followRedirects: false, validateStatus: (_) => true));
 
-    if (secondResponse.statusCode == 302)
-      throw Exception('Login request not properly redirected!');
+    final check = parse(response.data);
+    if (check.querySelector('.ErrorMessage') != null) {
+      throw Exception(check.querySelector('.ErrorMessage')?.text.trim());
+    }
 
-    return parse(secondResponse.body);
+    final location = response.headers['location']?.first;
+    if (location == null) {
+      throw Exception('Login request did not return a location header!');
+    }
+
+    final secondResponse = await _dio.get('$schema://cufs.$host/$location',
+        options: Options(followRedirects: false, validateStatus: (_) => true));
+
+    return parse(secondResponse.data);
   }
 
   Future<Document> sendCertificate(Document cert) async {
-    final res = await http.post(
-        cert.querySelector('form[name=hiddenform]').attributes['action'],
-        body: {
-          'wa': cert.querySelector('input[name=wa]').attributes['value'],
+    final formAction =
+        cert.querySelector('form[name=hiddenform]')?.attributes['action'];
+
+    if (formAction == null) {
+      throw Exception('Form action is null!');
+    }
+
+    final firstCert = await _dio.post(formAction,
+        data: {
+          'wa': cert.querySelector('input[name=wa]')?.attributes['value'] ?? '',
           'wresult':
-              cert.querySelector('input[name=wresult]').attributes['value'],
-          'wctx': cert.querySelector('input[name=wctx]').attributes['value']
-        });
+              cert.querySelector('input[name=wresult]')?.attributes['value'] ??
+                  '',
+          'wctx':
+              cert.querySelector('input[name=wctx]')?.attributes['value'] ?? ''
+        },
+        options: Options(headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        }, followRedirects: false, validateStatus: (_) => true));
 
-    final secondResponse = await http.get(res.request.url.scheme +
-        '://' +
-        res.request.url.host +
-        res.headers['location']);
+    final finalCert = parse(firstCert.data);
 
-    if (secondResponse.statusCode == 302)
-      throw Exception('Certificate request not properly redirected!');
+    final finalFormAction =
+        finalCert.querySelector('form[name=hiddenform]')?.attributes['action'];
 
-    return parse(secondResponse.body);
+    if (finalFormAction == null) {
+      throw Exception('Form action is null!');
+    }
+
+    final finalCertRes = await _dio.post(finalFormAction,
+        data: {
+          'wa':
+              finalCert.querySelector('input[name=wa]')?.attributes['value'] ??
+                  '',
+          'wresult': finalCert
+                  .querySelector('input[name=wresult]')
+                  ?.attributes['value'] ??
+              '',
+          'wctx': finalCert
+                  .querySelector('input[name=wctx]')
+                  ?.attributes['value'] ??
+              ''
+        },
+        options: Options(headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        }, followRedirects: true, validateStatus: (_) => true));
+
+    return parse(finalCertRes.data);
   }
 
   String encode(String url) {
@@ -79,9 +153,9 @@ class LoginHelper {
   }
 
   Future<Map<String, String>> getQrData() async {
-    var res = await http.get(
+    final res = await _dio.get(
         'http://uonetplus-uczen.$host/$symbol/$_schoolId/RejestracjaUrzadzeniaToken.mvc/Get');
-    var jsonData = json.decode(res.body)['data'];
+    final jsonData = json.decode(res.data)['data'];
     return {
       'pin': jsonData['PIN'],
       'symbol': jsonData['CustomerGroup'],

@@ -5,10 +5,11 @@
 A simple usage example:
 
 ```dart
-import 'package:sdk_dart/sdk_dart.dart';
+import 'package:wulkanowy/sdk.dart';
 
-main() {
-  var awesome = new Awesome();
+void main() async {
+  final sdk = WulkanowySdk('https', 'vulcan.net.pl');
+  print(await sdk.login('login', 'password', 'powiatjaroslawski'));
 }
 ```
 
